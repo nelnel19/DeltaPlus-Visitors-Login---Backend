@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
@@ -6,21 +7,32 @@ from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 
-DATABASE_URL = "sqlite:///./users.db"
+# Use environment variable for database URL, fallback to local SQLite
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./users.db")
 
-engine = create_engine(
-    DATABASE_URL, connect_args={"check_same_thread": False}
-)
+# Fix for Render's PostgreSQL URL (starts with postgres://)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Configure engine based on database type
+if DATABASE_URL.startswith("postgresql"):
+    engine = create_engine(DATABASE_URL)
+else:
+    engine = create_engine(
+        DATABASE_URL, connect_args={"check_same_thread": False}
+    )
 
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 app = FastAPI()
 
-# Allow React connection
+# Update CORS for production - get allowed origins from environment variable
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +72,7 @@ class Event(Base):
     users = relationship("User", foreign_keys="User.event_id", back_populates="event")
     creator = relationship("User", foreign_keys=[user_id], back_populates="created_events")
 
+# Create tables
 Base.metadata.create_all(bind=engine)
 
 # Request Schemas
@@ -96,6 +109,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# Health check endpoint for Render
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "database": "connected"}
+
+@app.get("/")
+def root():
+    return {"message": "API is running", "environment": os.getenv("RENDER", "development")}
 
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
