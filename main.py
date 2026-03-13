@@ -3,7 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 
@@ -38,6 +38,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Helper function to get Philippine Time (UTC+8)
+def get_philippine_time():
+    utc_time = datetime.now(timezone.utc)
+    ph_time = utc_time + timedelta(hours=8)  # Philippines is UTC+8
+    return ph_time.replace(tzinfo=None)  # Remove timezone info for database storage
+
 # Database Model for User - REMOVED house_number, street_name, barangay
 class User(Base):
     __tablename__ = "users"
@@ -50,7 +56,7 @@ class User(Base):
     city = Column(String)
     region = Column(String)
     email = Column(String, unique=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_philippine_time)
     event_id = Column(Integer, ForeignKey("events.id"), nullable=True)
     
     event = relationship("Event", foreign_keys=[event_id], back_populates="users")
@@ -65,7 +71,7 @@ class Event(Base):
     event_schedule = Column(DateTime, nullable=False)
     is_active = Column(Boolean, default=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_philippine_time)
     
     users = relationship("User", foreign_keys="User.event_id", back_populates="event")
     creator = relationship("User", foreign_keys=[user_id], back_populates="created_events")
@@ -132,7 +138,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         city=user.city,
         region=user.region,
         email=user.email,
-        created_at=datetime.now(),
+        created_at=get_philippine_time(),  # Use Philippine Time
         event_id=active_event.id if active_event else None
     )
 
@@ -143,7 +149,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     return {
         "message": "Registration successful",
         "user_id": new_user.id,
-        "assigned_event": active_event.event_name if active_event else None
+        "assigned_event": active_event.event_name if active_event else None,
+        "registered_at": new_user.created_at.strftime("%Y-%m-%d %H:%M:%S")  # Return the time
     }
 
 @app.get("/users")
@@ -180,7 +187,7 @@ def create_event(event: EventCreate, db: Session = Depends(get_db)):
             event_schedule=event_schedule,
             user_id=event.user_id,
             is_active=(event_count == 0),
-            created_at=datetime.now()
+            created_at=get_philippine_time()  # Use Philippine Time
         )
         
         db.add(new_event)
