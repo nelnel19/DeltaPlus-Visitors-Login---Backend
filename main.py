@@ -38,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database Model for User
+# Database Model for User - REMOVED house_number, street_name, barangay
 class User(Base):
     __tablename__ = "users"
 
@@ -46,9 +46,7 @@ class User(Base):
     full_name = Column(String)
     company_name = Column(String)
     phone = Column(String)
-    house_number = Column(String)
-    street_name = Column(String)
-    barangay = Column(String)
+    # Removed: house_number, street_name, barangay
     city = Column(String)
     region = Column(String)
     email = Column(String, unique=True)
@@ -58,7 +56,7 @@ class User(Base):
     event = relationship("Event", foreign_keys=[event_id], back_populates="users")
     created_events = relationship("Event", foreign_keys="Event.user_id", back_populates="creator")
 
-# Database Model for Event
+# Database Model for Event (unchanged)
 class Event(Base):
     __tablename__ = "events"
 
@@ -75,14 +73,12 @@ class Event(Base):
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-# Request Schemas
+# Request Schemas - REMOVED house_number, street_name, barangay
 class UserCreate(BaseModel):
     full_name: str
     company_name: str
     phone: str
-    house_number: str
-    street_name: str
-    barangay: str
+    # Removed: house_number, street_name, barangay
     city: str
     region: str
     email: str
@@ -132,9 +128,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         full_name=user.full_name,
         company_name=user.company_name,
         phone=user.phone,
-        house_number=user.house_number,
-        street_name=user.street_name,
-        barangay=user.barangay,
+        # Removed: house_number, street_name, barangay
         city=user.city,
         region=user.region,
         email=user.email,
@@ -161,9 +155,7 @@ def get_users(db: Session = Depends(get_db)):
             "full_name": user.full_name,
             "company_name": user.company_name,
             "phone": user.phone,
-            "house_number": user.house_number,
-            "street_name": user.street_name,
-            "barangay": user.barangay,
+            # Removed: house_number, street_name, barangay
             "city": user.city,
             "region": user.region,
             "email": user.email,
@@ -174,7 +166,7 @@ def get_users(db: Session = Depends(get_db)):
         for user in users
     ]
 
-# Event Endpoints
+# Event Endpoints (unchanged - keeping all event-related endpoints)
 @app.post("/events")
 def create_event(event: EventCreate, db: Session = Depends(get_db)):
     try:
