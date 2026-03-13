@@ -28,7 +28,7 @@ Base = declarative_base()
 app = FastAPI()
 
 # Update CORS for production - get allowed origins from environment variable
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://deltaplus-visitors-login-frontend.onrender.com").split(",")
 
 app.add_middleware(
     CORSMiddleware,
