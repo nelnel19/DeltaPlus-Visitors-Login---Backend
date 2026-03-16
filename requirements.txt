@@ -1,6 +1,7 @@
-sqlalchemy>=2.0.39
 fastapi==0.104.1
 uvicorn==0.24.0
+pymongo==4.5.0
 python-multipart==0.0.6
-pydantic>=2.7.0
-python-dotenv==1.0.0
+pydantic==2.4.2
+pydantic-settings==2.0.3
+certifi==2024.2.2
