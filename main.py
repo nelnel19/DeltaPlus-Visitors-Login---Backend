@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # MongoDB connection
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://username:password@cluster.mongodb.net/")
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://arnel123:123123123@cluster0.tpjir.mongodb.net/?appName=Cluster0")
 DB_NAME = os.getenv("DB_NAME", "visitors_db")
 
 # Configure MongoDB client
