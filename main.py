@@ -1,33 +1,52 @@
 import os
+import logging
 from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
-from pydantic import BaseModel
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+from bson import ObjectId
 from datetime import datetime, timezone, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+from pydantic import BaseModel, Field, validator
+import certifi
 
-# Use environment variable for database URL, fallback to local SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./users.db")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Fix for Render's PostgreSQL URL (starts with postgres://)
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# MongoDB connection
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://arnel123:123123123@cluster0.tpjir.mongodb.net/?appName=Cluster0")
+DB_NAME = os.getenv("DB_NAME", "visitors_db")
 
-# Configure engine based on database type
-if DATABASE_URL.startswith("postgresql"):
-    engine = create_engine(DATABASE_URL)
-else:
-    engine = create_engine(
-        DATABASE_URL, connect_args={"check_same_thread": False}
+# Configure MongoDB client
+try:
+    # Add TLS/SSL certificates for secure connection
+    client = MongoClient(
+        MONGODB_URL,
+        tlsCAFile=certifi.where(),  # For SSL certificate verification
+        serverSelectionTimeoutMS=5000,  # Timeout after 5 seconds
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000
     )
-
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+    # Test connection
+    client.admin.command('ping')
+    logger.info("Successfully connected to MongoDB")
+    
+    db = client[DB_NAME]
+    users_collection = db["users"]
+    events_collection = db["events"]
+    
+    # Create indexes
+    users_collection.create_index("email", unique=True)
+    events_collection.create_index("event_name")
+    
+except Exception as e:
+    logger.error(f"Failed to connect to MongoDB: {str(e)}")
+    raise
 
 app = FastAPI()
 
-# Update CORS for production - get allowed origins from environment variable
+# Update CORS for production
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://deltaplus-visitors-login-frontend.onrender.com").split(",")
 
 app.add_middleware(
@@ -42,277 +61,400 @@ app.add_middleware(
 def get_philippine_time():
     utc_time = datetime.now(timezone.utc)
     ph_time = utc_time + timedelta(hours=8)  # Philippines is UTC+8
-    return ph_time.replace(tzinfo=None)  # Remove timezone info for database storage
+    return ph_time
 
-# Database Model for User - REMOVED house_number, street_name, barangay
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    full_name = Column(String)
-    company_name = Column(String)
-    phone = Column(String)
-    # Removed: house_number, street_name, barangay
-    city = Column(String)
-    region = Column(String)
-    email = Column(String, unique=True)
-    created_at = Column(DateTime, default=get_philippine_time)
-    event_id = Column(Integer, ForeignKey("events.id"), nullable=True)
-    
-    event = relationship("Event", foreign_keys=[event_id], back_populates="users")
-    created_events = relationship("Event", foreign_keys="Event.user_id", back_populates="creator")
-
-# Database Model for Event (unchanged)
-class Event(Base):
-    __tablename__ = "events"
-
-    id = Column(Integer, primary_key=True, index=True)
-    event_name = Column(String, nullable=False)
-    event_schedule = Column(DateTime, nullable=False)
-    is_active = Column(Boolean, default=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=get_philippine_time)
-    
-    users = relationship("User", foreign_keys="User.event_id", back_populates="event")
-    creator = relationship("User", foreign_keys=[user_id], back_populates="created_events")
-
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Request Schemas - REMOVED house_number, street_name, barangay
+# Pydantic models for request/response
 class UserCreate(BaseModel):
     full_name: str
     company_name: str
     phone: str
-    # Removed: house_number, street_name, barangay
     city: str
     region: str
     email: str
 
+class UserResponse(BaseModel):
+    id: str
+    full_name: str
+    company_name: str
+    phone: str
+    city: str
+    region: str
+    email: str
+    created_at: datetime
+    event_id: Optional[str] = None
+    event_name: Optional[str] = None
+    event_schedule: Optional[datetime] = None
+
 class EventCreate(BaseModel):
     event_name: str
-    event_schedule: str
-    user_id: Optional[int] = None
+    event_location: str
+    event_start_date: str
+    event_end_date: str
+    user_id: Optional[str] = None
 
 class EventResponse(BaseModel):
-    id: int
+    id: str
     event_name: str
-    event_schedule: str
+    event_location: str
+    event_start_date: datetime
+    event_end_date: datetime
     is_active: bool
-    user_id: Optional[int]
-    created_at: str
+    user_id: Optional[str] = None
+    created_at: datetime
     
     class Config:
-        from_attributes = True
+        json_encoders = {
+            ObjectId: str
+        }
 
+# Helper function to convert MongoDB document to dict with string ID
+def mongo_to_dict(obj, additional_fields=None):
+    if obj:
+        obj['id'] = str(obj['_id'])
+        del obj['_id']
+        if additional_fields:
+            obj.update(additional_fields)
+    return obj
+
+# Dependency to get database
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    return {
+        "users": users_collection,
+        "events": events_collection
+    }
 
-# Health check endpoint for Render
+# Health check endpoint
 @app.get("/health")
-def health_check():
-    return {"status": "healthy", "database": "connected"}
+def health_check(db=Depends(get_db)):
+    try:
+        # Test database connection
+        user_count = db["users"].count_documents({})
+        return {
+            "status": "healthy", 
+            "database": "connected",
+            "database_type": "mongodb",
+            "user_count": user_count,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
 
 @app.get("/")
 def root():
-    return {"message": "API is running", "environment": os.getenv("RENDER", "development")}
-
-@app.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == user.email).first()
-
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    active_event = db.query(Event).filter(Event.is_active == True).first()
-    
-    new_user = User(
-        full_name=user.full_name,
-        company_name=user.company_name,
-        phone=user.phone,
-        # Removed: house_number, street_name, barangay
-        city=user.city,
-        region=user.region,
-        email=user.email,
-        created_at=get_philippine_time(),  # Use Philippine Time
-        event_id=active_event.id if active_event else None
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
     return {
-        "message": "Registration successful",
-        "user_id": new_user.id,
-        "assigned_event": active_event.event_name if active_event else None,
-        "registered_at": new_user.created_at.strftime("%Y-%m-%d %H:%M:%S")  # Return the time
+        "message": "API is running", 
+        "environment": os.getenv("RENDER", "development"),
+        "database": "mongodb"
     }
 
-@app.get("/users")
-def get_users(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    return [
-        {
-            "id": user.id,
+@app.get("/debug/db-status")
+def db_status(db=Depends(get_db)):
+    try:
+        # Test database connection
+        user_count = db["users"].count_documents({})
+        event_count = db["events"].count_documents({})
+        
+        # Get MongoDB info (mask connection string)
+        db_url = os.getenv("MONGODB_URL", "Not set")
+        if db_url != "Not set" and "@" in db_url:
+            parts = db_url.split("@")
+            masked_url = f"mongodb://****:****@{parts[1]}"
+        else:
+            masked_url = "mongodb://****:****@cluster.mongodb.net"
+        
+        return {
+            "status": "connected",
+            "database_type": "mongodb",
+            "user_count": user_count,
+            "event_count": event_count,
+            "connection_string": masked_url,
+            "database_name": DB_NAME,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/debug/check-user/{email}")
+def check_user(email: str, db=Depends(get_db)):
+    user = db["users"].find_one({"email": email})
+    if user:
+        user = mongo_to_dict(user)
+        return {
+            "exists": True,
+            "user_id": user["id"],
+            "full_name": user["full_name"],
+            "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
+            "region": user["region"],
+            "city": user["city"]
+        }
+    return {"exists": False}
+
+@app.post("/register")
+def register(user: UserCreate, db=Depends(get_db)):
+    logger.info(f"Registration attempt for email: {user.email}")
+    
+    try:
+        # Check if email already exists
+        existing = db["users"].find_one({"email": user.email})
+        if existing:
+            logger.warning(f"Email already registered: {user.email}")
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        # Get active event
+        active_event = db["events"].find_one({"is_active": True})
+        
+        # Create new user document
+        new_user = {
             "full_name": user.full_name,
             "company_name": user.company_name,
             "phone": user.phone,
-            # Removed: house_number, street_name, barangay
             "city": user.city,
             "region": user.region,
             "email": user.email,
-            "created_at": user.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "event_name": user.event.event_name if user.event else None,
-            "event_schedule": user.event.event_schedule.strftime("%Y-%m-%d %H:%M:%S") if user.event else None
+            "created_at": get_philippine_time(),
+            "event_id": str(active_event["_id"]) if active_event else None
         }
-        for user in users
-    ]
 
-# Event Endpoints (unchanged - keeping all event-related endpoints)
-@app.post("/events")
-def create_event(event: EventCreate, db: Session = Depends(get_db)):
+        result = db["users"].insert_one(new_user)
+        new_user["_id"] = result.inserted_id
+        
+        logger.info(f"User registered successfully: ID {result.inserted_id}, Email: {user.email}")
+        
+        # Verify the user was saved
+        verify_user = db["users"].find_one({"_id": result.inserted_id})
+        if verify_user:
+            logger.info(f"Verification: User {result.inserted_id} found in database")
+        else:
+            logger.error(f"Verification FAILED: User {result.inserted_id} not found after commit!")
+
+        return {
+            "message": "Registration successful",
+            "user_id": str(result.inserted_id),
+            "assigned_event": active_event["event_name"] if active_event else None,
+            "registered_at": new_user["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during registration: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+@app.get("/users", response_model=List[UserResponse])
+def get_users(db=Depends(get_db)):
     try:
-        # Parse the datetime string (format: "YYYY-MM-DD HH:MM:SS")
-        event_schedule = datetime.strptime(event.event_schedule, "%Y-%m-%d %H:%M:%S")
+        users = list(db["users"].find().sort("created_at", -1))
         
-        event_count = db.query(Event).count()
+        result = []
+        for user in users:
+            user_dict = mongo_to_dict(user)
+            
+            # Get event details if user has an event
+            if user_dict.get("event_id"):
+                event = db["events"].find_one({"_id": ObjectId(user_dict["event_id"])})
+                if event:
+                    user_dict["event_name"] = event["event_name"]
+                    # Use start date for display
+                    user_dict["event_schedule"] = event["event_start_date"]
+            
+            result.append(user_dict)
         
-        new_event = Event(
-            event_name=event.event_name,
-            event_schedule=event_schedule,
-            user_id=event.user_id,
-            is_active=(event_count == 0),
-            created_at=get_philippine_time()  # Use Philippine Time
-        )
+        logger.info(f"Fetching users: found {len(result)} users")
+        return result
         
-        db.add(new_event)
-        db.commit()
-        db.refresh(new_event)
+    except Exception as e:
+        logger.error(f"Error fetching users: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching users")
+
+@app.post("/events")
+def create_event(event: EventCreate, db=Depends(get_db)):
+    try:
+        # Parse the datetime strings (format: "YYYY-MM-DD")
+        event_start_date = datetime.strptime(event.event_start_date, "%Y-%m-%d")
+        event_end_date = datetime.strptime(event.event_end_date, "%Y-%m-%d")
+        
+        if event_end_date < event_start_date:
+            raise HTTPException(status_code=400, detail="End date cannot be before start date")
+        
+        event_count = db["events"].count_documents({})
+        
+        new_event = {
+            "event_name": event.event_name,
+            "event_location": event.event_location,
+            "event_start_date": event_start_date,
+            "event_end_date": event_end_date,
+            "user_id": event.user_id,
+            "is_active": (event_count == 0),
+            "created_at": get_philippine_time()
+        }
+        
+        result = db["events"].insert_one(new_event)
+        
+        logger.info(f"Event created successfully: {result.inserted_id} - {event.event_name}")
         
         return {
             "message": "Event created successfully",
-            "event_id": new_event.id
+            "event_id": str(result.inserted_id)
         }
     except Exception as e:
+        logger.error(f"Error creating event: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Error creating event: {str(e)}")
 
 @app.get("/events", response_model=List[EventResponse])
-def get_events(db: Session = Depends(get_db)):
-    events = db.query(Event).order_by(Event.event_schedule).all()
-    return [
-        {
-            "id": event.id,
-            "event_name": event.event_name,
-            "event_schedule": event.event_schedule.strftime("%Y-%m-%d %H:%M:%S"),
-            "is_active": event.is_active,
-            "user_id": event.user_id,
-            "created_at": event.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        for event in events
-    ]
+def get_events(db=Depends(get_db)):
+    try:
+        events = list(db["events"].find().sort("event_start_date", 1))
+        return [mongo_to_dict(event) for event in events]
+    except Exception as e:
+        logger.error(f"Error fetching events: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching events")
 
 @app.post("/events/{event_id}/set-active")
-def set_active_event(event_id: int, db: Session = Depends(get_db)):
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    # Deactivate all events
-    db.query(Event).update({Event.is_active: False})
-    # Activate the selected event
-    event.is_active = True
-    db.commit()
-    
-    return {
-        "message": f"Event '{event.event_name}' is now the active event",
-        "event_id": event.id
-    }
+def set_active_event(event_id: str, db=Depends(get_db)):
+    try:
+        event = db["events"].find_one({"_id": ObjectId(event_id)})
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        # Deactivate all events
+        db["events"].update_many({}, {"$set": {"is_active": False}})
+        
+        # Activate the selected event
+        db["events"].update_one(
+            {"_id": ObjectId(event_id)}, 
+            {"$set": {"is_active": True}}
+        )
+        
+        logger.info(f"Event set to active: {event['event_name']} (ID: {event_id})")
+        
+        return {
+            "message": f"Event '{event['event_name']}' is now the active event",
+            "event_id": event_id
+        }
+    except Exception as e:
+        logger.error(f"Error setting active event: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error setting active event: {str(e)}")
 
 @app.get("/events/active")
-def get_active_event(db: Session = Depends(get_db)):
-    active_event = db.query(Event).filter(Event.is_active == True).first()
-    if not active_event:
-        return {"message": "No active event set", "event_name": None}
-    
-    return {
-        "id": active_event.id,
-        "event_name": active_event.event_name,
-        "event_schedule": active_event.event_schedule.strftime("%Y-%m-%d %H:%M:%S"),
-        "is_active": True
-    }
+def get_active_event(db=Depends(get_db)):
+    try:
+        active_event = db["events"].find_one({"is_active": True})
+        if not active_event:
+            return {"message": "No active event set", "event_name": None}
+        
+        event_dict = mongo_to_dict(active_event)
+        return {
+            "id": event_dict["id"],
+            "event_name": event_dict["event_name"],
+            "event_location": event_dict["event_location"],
+            "event_start_date": event_dict["event_start_date"].strftime("%Y-%m-%d"),
+            "event_end_date": event_dict["event_end_date"].strftime("%Y-%m-%d"),
+            "is_active": True
+        }
+    except Exception as e:
+        logger.error(f"Error fetching active event: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching active event")
 
 @app.get("/events/{event_id}", response_model=EventResponse)
-def get_event(event_id: int, db: Session = Depends(get_db)):
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    return {
-        "id": event.id,
-        "event_name": event.event_name,
-        "event_schedule": event.event_schedule.strftime("%Y-%m-%d %H:%M:%S"),
-        "is_active": event.is_active,
-        "user_id": event.user_id,
-        "created_at": event.created_at.strftime("%Y-%m-%d %H:%M:%S")
-    }
+def get_event(event_id: str, db=Depends(get_db)):
+    try:
+        event = db["events"].find_one({"_id": ObjectId(event_id)})
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        return mongo_to_dict(event)
+    except Exception as e:
+        logger.error(f"Error fetching event: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching event")
 
 @app.put("/events/{event_id}")
-def update_event(event_id: int, event_update: EventCreate, db: Session = Depends(get_db)):
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
+def update_event(event_id: str, event_update: EventCreate, db=Depends(get_db)):
     try:
-        # Parse the datetime string (format: "YYYY-MM-DD HH:MM:SS")
-        event_schedule = datetime.strptime(event_update.event_schedule, "%Y-%m-%d %H:%M:%S")
+        event = db["events"].find_one({"_id": ObjectId(event_id)})
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
         
-        event.event_name = event_update.event_name
-        event.event_schedule = event_schedule
-        event.user_id = event_update.user_id
+        # Parse the datetime strings
+        event_start_date = datetime.strptime(event_update.event_start_date, "%Y-%m-%d")
+        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%m-%d")
         
-        db.commit()
-        db.refresh(event)
+        if event_end_date < event_start_date:
+            raise HTTPException(status_code=400, detail="End date cannot be before start date")
+        
+        db["events"].update_one(
+            {"_id": ObjectId(event_id)},
+            {"$set": {
+                "event_name": event_update.event_name,
+                "event_location": event_update.event_location,
+                "event_start_date": event_start_date,
+                "event_end_date": event_end_date,
+                "user_id": event_update.user_id
+            }}
+        )
+        
+        logger.info(f"Event updated successfully: {event_id} - {event_update.event_name}")
         
         return {"message": "Event updated successfully"}
     except Exception as e:
+        logger.error(f"Error updating event: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Error updating event: {str(e)}")
 
 @app.delete("/events/{event_id}")
-def delete_event(event_id: int, db: Session = Depends(get_db)):
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    was_active = event.is_active
-    
-    # Remove event reference from users
-    db.query(User).filter(User.event_id == event_id).update({User.event_id: None})
-    
-    # Delete the event
-    db.delete(event)
-    db.commit()
-    
-    # If the deleted event was active, set another event as active
-    if was_active:
-        next_event = db.query(Event).first()
-        if next_event:
-            next_event.is_active = True
-            db.commit()
-    
-    return {"message": "Event deleted successfully"}
+def delete_event(event_id: str, db=Depends(get_db)):
+    try:
+        event = db["events"].find_one({"_id": ObjectId(event_id)})
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        was_active = event["is_active"]
+        
+        # Remove event reference from users
+        db["users"].update_many(
+            {"event_id": event_id},
+            {"$set": {"event_id": None}}
+        )
+        
+        # Delete the event
+        db["events"].delete_one({"_id": ObjectId(event_id)})
+        
+        # If the deleted event was active, set another event as active
+        if was_active:
+            next_event = db["events"].find_one()
+            if next_event:
+                db["events"].update_one(
+                    {"_id": next_event["_id"]},
+                    {"$set": {"is_active": True}}
+                )
+        
+        logger.info(f"Event deleted successfully: ID {event_id}")
+        
+        return {"message": "Event deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting event: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting event: {str(e)}")
 
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    db.delete(user)
-    db.commit()
-    
-    return {"message": "User deleted successfully"}
+def delete_user(user_id: str, db=Depends(get_db)):
+    try:
+        user = db["users"].find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        db["users"].delete_one({"_id": ObjectId(user_id)})
+        
+        logger.info(f"User deleted successfully: ID {user_id}")
+        
+        return {"message": "User deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting user: {str(e)}")
+
+# Optional: Add cleanup on shutdown
+@app.on_event("shutdown")
+def shutdown_db_client():
+    client.close()
+    logger.info("MongoDB connection closed")
