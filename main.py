@@ -87,17 +87,13 @@ class UserResponse(BaseModel):
 
 class EventCreate(BaseModel):
     event_name: str
-    event_location: str
-    event_start_date: str
-    event_end_date: str
+    event_schedule: str
     user_id: Optional[str] = None
 
 class EventResponse(BaseModel):
     id: str
     event_name: str
-    event_location: str
-    event_start_date: datetime
-    event_end_date: datetime
+    event_schedule: datetime
     is_active: bool
     user_id: Optional[str] = None
     created_at: datetime
@@ -258,8 +254,7 @@ def get_users(db=Depends(get_db)):
                 event = db["events"].find_one({"_id": ObjectId(user_dict["event_id"])})
                 if event:
                     user_dict["event_name"] = event["event_name"]
-                    # Use start date for display
-                    user_dict["event_schedule"] = event["event_start_date"]
+                    user_dict["event_schedule"] = event["event_schedule"]
             
             result.append(user_dict)
         
@@ -273,20 +268,14 @@ def get_users(db=Depends(get_db)):
 @app.post("/events")
 def create_event(event: EventCreate, db=Depends(get_db)):
     try:
-        # Parse the datetime strings (format: "YYYY-MM-DD")
-        event_start_date = datetime.strptime(event.event_start_date, "%Y-%m-%d")
-        event_end_date = datetime.strptime(event.event_end_date, "%Y-%m-%d")
-        
-        if event_end_date < event_start_date:
-            raise HTTPException(status_code=400, detail="End date cannot be before start date")
+        # Parse the datetime string (format: "YYYY-MM-DD HH:MM:SS")
+        event_schedule = datetime.strptime(event.event_schedule, "%Y-%m-%d %H:%M:%S")
         
         event_count = db["events"].count_documents({})
         
         new_event = {
             "event_name": event.event_name,
-            "event_location": event.event_location,
-            "event_start_date": event_start_date,
-            "event_end_date": event_end_date,
+            "event_schedule": event_schedule,
             "user_id": event.user_id,
             "is_active": (event_count == 0),
             "created_at": get_philippine_time()
@@ -307,7 +296,7 @@ def create_event(event: EventCreate, db=Depends(get_db)):
 @app.get("/events", response_model=List[EventResponse])
 def get_events(db=Depends(get_db)):
     try:
-        events = list(db["events"].find().sort("event_start_date", 1))
+        events = list(db["events"].find().sort("event_schedule", 1))
         return [mongo_to_dict(event) for event in events]
     except Exception as e:
         logger.error(f"Error fetching events: {str(e)}")
@@ -350,9 +339,7 @@ def get_active_event(db=Depends(get_db)):
         return {
             "id": event_dict["id"],
             "event_name": event_dict["event_name"],
-            "event_location": event_dict["event_location"],
-            "event_start_date": event_dict["event_start_date"].strftime("%Y-%m-%d"),
-            "event_end_date": event_dict["event_end_date"].strftime("%Y-%m-%d"),
+            "event_schedule": event_dict["event_schedule"].strftime("%Y-%m-%d %H:%M:%S"),
             "is_active": True
         }
     except Exception as e:
@@ -378,20 +365,14 @@ def update_event(event_id: str, event_update: EventCreate, db=Depends(get_db)):
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
         
-        # Parse the datetime strings
-        event_start_date = datetime.strptime(event_update.event_start_date, "%Y-%m-%d")
-        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%m-%d")
-        
-        if event_end_date < event_start_date:
-            raise HTTPException(status_code=400, detail="End date cannot be before start date")
+        # Parse the datetime string
+        event_schedule = datetime.strptime(event_update.event_schedule, "%Y-%m-%d %H:%M:%S")
         
         db["events"].update_one(
             {"_id": ObjectId(event_id)},
             {"$set": {
                 "event_name": event_update.event_name,
-                "event_location": event_update.event_location,
-                "event_start_date": event_start_date,
-                "event_end_date": event_end_date,
+                "event_schedule": event_schedule,
                 "user_id": event_update.user_id
             }}
         )
