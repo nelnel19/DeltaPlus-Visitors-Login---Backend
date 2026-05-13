@@ -35,11 +35,14 @@ try:
     events_collection = db["events"]
     inquiries_collection = db["inquiries"]
     
-    # Create indexes
-    users_collection.create_index("email", unique=True)
+    # Create indexes - REMOVED unique constraint on email to allow duplicate emails
+    users_collection.create_index("email")  # Changed: removed unique=True
     events_collection.create_index("event_name")
     inquiries_collection.create_index("user_email")
     inquiries_collection.create_index("created_at")
+    
+    # Optional: Create compound index for timestamp queries
+    users_collection.create_index([("created_at", -1)])
     
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -68,7 +71,7 @@ def get_philippine_time():
 class UserCreate(BaseModel):
     full_name: str
     company_name: str
-    position: str  # NEW POSITION FIELD
+    position: str
     phone: str
     city: str
     region: str
@@ -79,7 +82,7 @@ class UserResponse(BaseModel):
     id: str
     full_name: str
     company_name: str
-    position: str  # NEW POSITION FIELD
+    position: str
     phone: str
     city: str
     region: str
@@ -159,16 +162,15 @@ def register(user: UserCreate, db=Depends(get_db)):
     logger.info(f"Registration attempt for email: {user.email}")
     
     try:
-        existing = db["users"].find_one({"email": user.email})
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already registered")
-
+        # REMOVED: Email duplicate check - allowing multiple registrations with same email
+        # No longer checking if email already exists
+        
         active_event = db["events"].find_one({"is_active": True})
         
         new_user = {
             "full_name": user.full_name,
             "company_name": user.company_name,
-            "position": user.position,  # NEW POSITION FIELD
+            "position": user.position,
             "phone": user.phone,
             "city": user.city,
             "region": user.region,
@@ -186,7 +188,7 @@ def register(user: UserCreate, db=Depends(get_db)):
                 "user_name": user.full_name,
                 "user_email": user.email,
                 "user_company": user.company_name,
-                "user_position": user.position,  # NEW POSITION FIELD
+                "user_position": user.position,
                 "user_phone": user.phone,
                 "inquiry_text": user.inquiry,
                 "status": "pending",
@@ -203,6 +205,7 @@ def register(user: UserCreate, db=Depends(get_db)):
         }
         
     except DuplicateKeyError:
+        # This should not happen now since we removed unique constraint
         raise HTTPException(status_code=400, detail="Email already registered")
     except HTTPException:
         raise
@@ -355,7 +358,7 @@ def update_event(event_id: str, event_update: EventCreate, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Event not found")
         
         event_start_date = datetime.strptime(event_update.event_start_date, "%Y-%m-%d")
-        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%d-%d")
+        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%m-%d")
         
         if event_end_date < event_start_date:
             raise HTTPException(status_code=400, detail="End date cannot be before start date")
