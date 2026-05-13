@@ -33,10 +33,13 @@ try:
     db = client[DB_NAME]
     users_collection = db["users"]
     events_collection = db["events"]
+    inquiries_collection = db["inquiries"]
     
     # Create indexes
     users_collection.create_index("email", unique=True)
     events_collection.create_index("event_name")
+    inquiries_collection.create_index("user_email")
+    inquiries_collection.create_index("created_at")
     
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -69,6 +72,7 @@ class UserCreate(BaseModel):
     city: str
     region: str
     email: str
+    inquiry: Optional[str] = None  # New optional inquiry field
 
 class UserResponse(BaseModel):
     id: str
@@ -82,6 +86,7 @@ class UserResponse(BaseModel):
     event_id: Optional[str] = None
     event_name: Optional[str] = None
     event_schedule: Optional[datetime] = None
+    inquiry: Optional[str] = None  # New optional inquiry field
 
 class EventCreate(BaseModel):
     event_name: str
@@ -100,6 +105,22 @@ class EventResponse(BaseModel):
     user_id: Optional[str] = None
     created_at: datetime
 
+class InquiryCreate(BaseModel):
+    user_name: str
+    user_email: str
+    inquiry_text: str
+    status: str = "pending"
+
+class InquiryResponse(BaseModel):
+    id: str
+    user_name: str
+    user_email: str
+    inquiry_text: str
+    status: str
+    created_at: datetime
+    response: Optional[str] = None
+    responded_at: Optional[datetime] = None
+
 def mongo_to_dict(obj):
     if obj:
         obj['id'] = str(obj['_id'])
@@ -109,7 +130,8 @@ def mongo_to_dict(obj):
 def get_db():
     return {
         "users": users_collection,
-        "events": events_collection
+        "events": events_collection,
+        "inquiries": inquiries_collection
     }
 
 @app.get("/health")
@@ -149,10 +171,26 @@ def register(user: UserCreate, db=Depends(get_db)):
             "region": user.region,
             "email": user.email,
             "created_at": get_philippine_time(),
-            "event_id": str(active_event["_id"]) if active_event else None
+            "event_id": str(active_event["_id"]) if active_event else None,
+            "inquiry": user.inquiry if user.inquiry else None  # Save inquiry if provided
         }
 
         result = db["users"].insert_one(new_user)
+        
+        # If inquiry was provided, also save it to the inquiries collection for admin tracking
+        if user.inquiry and user.inquiry.strip():
+            inquiry_data = {
+                "user_name": user.full_name,
+                "user_email": user.email,
+                "user_company": user.company_name,
+                "user_phone": user.phone,
+                "inquiry_text": user.inquiry,
+                "status": "pending",
+                "created_at": get_philippine_time(),
+                "user_id": str(result.inserted_id)
+            }
+            db["inquiries"].insert_one(inquiry_data)
+            logger.info(f"Inquiry saved for user: {user.email}")
         
         return {
             "message": "Registration successful",
@@ -359,14 +397,93 @@ def delete_event(event_id: str, db=Depends(get_db)):
 @app.delete("/users/{user_id}")
 def delete_user(user_id: str, db=Depends(get_db)):
     try:
+        # Get user info before deletion
+        user = db["users"].find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Delete related inquiries
+        db["inquiries"].delete_many({"user_email": user.get("email")})
+        
+        # Delete user
         result = db["users"].delete_one({"_id": ObjectId(user_id)})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="User not found")
         
-        return {"message": "User deleted successfully"}
+        return {"message": "User and associated inquiries deleted successfully"}
     except Exception as e:
         logger.error(f"Error deleting user: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# ==================== INQUIRIES ENDPOINTS ====================
+
+@app.get("/inquiries")
+def get_inquiries(db=Depends(get_db)):
+    """Get all inquiries"""
+    try:
+        inquiries = list(db["inquiries"].find().sort("created_at", -1))
+        return [mongo_to_dict(inquiry) for inquiry in inquiries]
+    except Exception as e:
+        logger.error(f"Error fetching inquiries: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching inquiries")
+
+@app.get("/inquiries/pending")
+def get_pending_inquiries(db=Depends(get_db)):
+    """Get all pending inquiries"""
+    try:
+        inquiries = list(db["inquiries"].find({"status": "pending"}).sort("created_at", -1))
+        return [mongo_to_dict(inquiry) for inquiry in inquiries]
+    except Exception as e:
+        logger.error(f"Error fetching pending inquiries: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching inquiries")
+
+@app.get("/inquiries/{inquiry_id}")
+def get_inquiry(inquiry_id: str, db=Depends(get_db)):
+    """Get a single inquiry by ID"""
+    try:
+        inquiry = db["inquiries"].find_one({"_id": ObjectId(inquiry_id)})
+        if not inquiry:
+            raise HTTPException(status_code=404, detail="Inquiry not found")
+        return mongo_to_dict(inquiry)
+    except Exception as e:
+        logger.error(f"Error fetching inquiry: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching inquiry")
+
+@app.put("/inquiries/{inquiry_id}/respond")
+def respond_to_inquiry(inquiry_id: str, response_text: str, db=Depends(get_db)):
+    """Respond to an inquiry"""
+    try:
+        inquiry = db["inquiries"].find_one({"_id": ObjectId(inquiry_id)})
+        if not inquiry:
+            raise HTTPException(status_code=404, detail="Inquiry not found")
+        
+        db["inquiries"].update_one(
+            {"_id": ObjectId(inquiry_id)},
+            {
+                "$set": {
+                    "status": "responded",
+                    "response": response_text,
+                    "responded_at": get_philippine_time()
+                }
+            }
+        )
+        
+        return {"message": "Response added successfully"}
+    except Exception as e:
+        logger.error(f"Error responding to inquiry: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error responding to inquiry")
+
+@app.delete("/inquiries/{inquiry_id}")
+def delete_inquiry(inquiry_id: str, db=Depends(get_db)):
+    """Delete an inquiry"""
+    try:
+        result = db["inquiries"].delete_one({"_id": ObjectId(inquiry_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Inquiry not found")
+        return {"message": "Inquiry deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting inquiry: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error deleting inquiry")
 
 @app.on_event("shutdown")
 def shutdown_db_client():
