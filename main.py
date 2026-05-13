@@ -2,7 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, Depends, HTTPException
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from bson import ObjectId
 from datetime import datetime, timezone, timedelta
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,14 +35,28 @@ try:
     events_collection = db["events"]
     inquiries_collection = db["inquiries"]
     
-    # Create indexes - REMOVED unique constraint on email to allow duplicate emails
-    users_collection.create_index("email")  # Changed: removed unique=True
-    events_collection.create_index("event_name")
-    inquiries_collection.create_index("user_email")
-    inquiries_collection.create_index("created_at")
+    # Drop existing email index if it exists (to remove unique constraint)
+    try:
+        # List all indexes
+        indexes = list(users_collection.list_indexes())
+        for index in indexes:
+            if index.get('name') == 'email_1':
+                users_collection.drop_index('email_1')
+                logger.info("Dropped existing email_1 index")
+                break
+    except Exception as e:
+        logger.warning(f"Error dropping index: {e}")
     
-    # Optional: Create compound index for timestamp queries
+    # Create indexes - without unique constraint on email
+    users_collection.create_index([("email", 1)])  # No unique=True
+    events_collection.create_index([("event_name", 1)])
+    inquiries_collection.create_index([("user_email", 1)])
+    inquiries_collection.create_index([("created_at", -1)])
+    
+    # Create compound index for timestamp queries
     users_collection.create_index([("created_at", -1)])
+    
+    logger.info("All indexes created successfully")
     
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
