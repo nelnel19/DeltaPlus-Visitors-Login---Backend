@@ -68,16 +68,18 @@ def get_philippine_time():
 class UserCreate(BaseModel):
     full_name: str
     company_name: str
+    position: str  # NEW POSITION FIELD
     phone: str
     city: str
     region: str
     email: str
-    inquiry: Optional[str] = None  # New optional inquiry field
+    inquiry: Optional[str] = None
 
 class UserResponse(BaseModel):
     id: str
     full_name: str
     company_name: str
+    position: str  # NEW POSITION FIELD
     phone: str
     city: str
     region: str
@@ -86,7 +88,7 @@ class UserResponse(BaseModel):
     event_id: Optional[str] = None
     event_name: Optional[str] = None
     event_schedule: Optional[datetime] = None
-    inquiry: Optional[str] = None  # New optional inquiry field
+    inquiry: Optional[str] = None
 
 class EventCreate(BaseModel):
     event_name: str
@@ -166,13 +168,14 @@ def register(user: UserCreate, db=Depends(get_db)):
         new_user = {
             "full_name": user.full_name,
             "company_name": user.company_name,
+            "position": user.position,  # NEW POSITION FIELD
             "phone": user.phone,
             "city": user.city,
             "region": user.region,
             "email": user.email,
             "created_at": get_philippine_time(),
             "event_id": str(active_event["_id"]) if active_event else None,
-            "inquiry": user.inquiry if user.inquiry else None  # Save inquiry if provided
+            "inquiry": user.inquiry if user.inquiry else None
         }
 
         result = db["users"].insert_one(new_user)
@@ -183,6 +186,7 @@ def register(user: UserCreate, db=Depends(get_db)):
                 "user_name": user.full_name,
                 "user_email": user.email,
                 "user_company": user.company_name,
+                "user_position": user.position,  # NEW POSITION FIELD
                 "user_phone": user.phone,
                 "inquiry_text": user.inquiry,
                 "status": "pending",
@@ -351,7 +355,7 @@ def update_event(event_id: str, event_update: EventCreate, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Event not found")
         
         event_start_date = datetime.strptime(event_update.event_start_date, "%Y-%m-%d")
-        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%m-%d")
+        event_end_date = datetime.strptime(event_update.event_end_date, "%Y-%d-%d")
         
         if event_end_date < event_start_date:
             raise HTTPException(status_code=400, detail="End date cannot be before start date")
