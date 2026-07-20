@@ -65,7 +65,7 @@ except Exception as e:
 app = FastAPI()
 
 # CORS configuration
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://deltaplus-visitors-login-frontend.onrender.com").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://deltaplus-visitors-login.onrender.com").split(",")
 
 app.add_middleware(
     CORSMiddleware,
